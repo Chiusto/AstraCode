@@ -12,7 +12,7 @@ harness/
 
 | 目录                                     | 内容                                                                                     | 能否直接运行        |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------- |
-| `packages/`                              | `llm/*`、`core/*`、`compaction/*`、`context/time-context`、`util/output-retention`        | 作为库被 `cli` 引用 |
+| [`packages/`](packages/README.zh.md)     | `llm/*`、`core/*`、`compaction/*`、`context/time-context`、`util/output-retention`        | 作为库被 `cli` 引用 |
 | [`cli/`](cli/README.zh.md)                | 组合根（会话、模型注册表、压缩引擎、工具执行器）+ readline 交互界面                       | 能：`node harness/cli/index.ts` |
 
 ## 快速开始

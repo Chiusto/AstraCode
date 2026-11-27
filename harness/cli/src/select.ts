@@ -7,7 +7,7 @@
 
 import type * as readline from 'node:readline'
 import { StringDecoder } from 'node:string_decoder'
-import { columns, fitLine } from './render.ts'
+import { columns, fitLine, styledWidth } from './render.ts'
 import type { Theme } from './render.ts'
 
 export interface SelectItem {
@@ -29,6 +29,11 @@ export interface SelectOptions {
   interactive?: boolean
   /** Type to filter: 退格删除，Ctrl+U 清空。 */
   filterable?: boolean
+  /**
+   * 输入行怎么画。菜单打开期间由选择器接管这一行，保证提示符停在原位、
+   * 菜单只在其下方展开；不传则画一个空的 `› `。
+   */
+  prompt?: (text: string) => string
 }
 
 const ESC = '\u001B'
@@ -109,9 +114,9 @@ export async function selectOption(options: SelectOptions): Promise<string | und
       ? `输入筛选${position} · ↑↓ 选择 · Enter 确认 · Esc 取消`
       : `↑↓ 选择${position} · Enter 确认 · Esc 取消`
     const heading =
-      `${theme.cyan('?')} ${theme.bold(options.title)}` +
-      (query !== '' ? ` ${theme.cyan(`「${query}」`)}` : '')
-    lines.push(`${heading} ${theme.gray(`(${keys})`)}`)
+      `${theme.gray('›')} ${theme.bold(options.title)}` +
+      (query !== '' ? ` ${theme.gray(`「${query}」`)}` : '')
+    lines.push(`${heading}  ${theme.gray(keys)}`)
 
     if (shown.length === 0) {
       lines.push(`  ${theme.gray('（没有匹配项，退格修改或 Esc 取消）')}`)
@@ -127,16 +132,37 @@ export async function selectOption(options: SelectOptions): Promise<string | und
     }
     if (options.footer) lines.push(`  ${theme.gray(options.footer)}`)
 
-    if (rendered > 0) output.write(`${ESC}[${rendered}A`)
     const width = columns()
-    for (const line of lines) output.write(`\r${ESC}[2K${fitLine(line, width)}\n`)
-    // 这一轮比上一轮短：把残留的旧行擦掉。
-    if (rendered > lines.length) output.write(`\r${ESC}[2K${ESC}[J`)
+    // 命令菜单：输入行钉在原位，菜单只往它下面长，结束时光标回到输入行末尾。
+    if (options.prompt !== undefined) {
+      const prompt = fitLine(options.prompt(`/${query}`), width)
+      output.write(`\r${ESC}[2K${ESC}[J`)
+      output.write(prompt)
+      for (const line of lines) output.write(`\n\r${ESC}[2K${fitLine(line, width)}`)
+      if (lines.length > 0) output.write(`${ESC}[${lines.length}A`)
+      output.write('\r')
+      const column = styledWidth(prompt)
+      if (column > 0) output.write(`${ESC}[${column}C`)
+      rendered = lines.length
+      return
+    }
+    // 二级选择（/model 等）：就地展开，光标停在菜单末行。
+    if (rendered > 0) output.write(`${ESC}[${rendered - 1}A`)
+    output.write(`\r${ESC}[2K${ESC}[J`)
+    lines.forEach((line, at) => {
+      if (at > 0) output.write('\n')
+      output.write(`\r${ESC}[2K${fitLine(line, width)}`)
+    })
     rendered = lines.length
   }
 
   const erase = (): void => {
-    if (rendered > 0) output.write(`\r${ESC}[${rendered}A${ESC}[J`)
+    if (options.prompt !== undefined) {
+      // 光标在输入行：连同下方菜单一起清掉，位置留给调用方重画提示符。
+      output.write(`\r${ESC}[2K${ESC}[J`)
+    } else if (rendered > 0) {
+      output.write(`${ESC}[${rendered - 1}A\r${ESC}[2K${ESC}[J`)
+    }
     rendered = 0
   }
 

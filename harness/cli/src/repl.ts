@@ -27,9 +27,15 @@ import type { ModelStore } from './models.ts'
 import { createSystemPrompt } from './prompt.ts'
 import { readSecret } from './secret.ts'
 import {
+  BULLET,
   clipLine,
   columns,
+  contextLeft,
+  composerPrompt,
+  displayWidth,
+  MessageWriter,
   printError,
+  printFooter,
   printHeader,
   printHelp,
   printInterrupt,
@@ -41,7 +47,7 @@ import {
 import type { Theme } from './render.ts'
 import { selectOption } from './select.ts'
 import type { SelectItem } from './select.ts'
-import { Spinner } from './spinner.ts'
+import { Waiting } from './waiting.ts'
 
 export interface AppState {
   config: CliConfig
@@ -97,13 +103,16 @@ const COMMAND_MENU: SelectItem[] = [
   { label: '/exit', hint: '退出（等同 Ctrl+D）', value: '/exit' },
 ]
 
-/** 目录选择器里跳过的重目录。 */
+/** Skip dirs in the directory picker. */
 const SKIP_DIRS = new Set(['node_modules', '.git', '.workbuddy', 'dist', 'build', '.venv', '__pycache__'])
+
+/** Dim text shown in the empty composer. */
+const PLACEHOLDER = '问问 Astra，或描述一个任务'
 
 /** Mount the interactive loop. Returns as soon as the interface is created. */
 export function startRepl(state: AppState): void {
   const theme = state.theme
-  const spinner = new Spinner(theme)
+  const waiting = new Waiting(theme)
   let llm = state.createLlm()
   let compaction = state.createCompaction(llm, (text) => printNotice(theme, text))
   let systemPrompt = createSystemPrompt(state.config, state.tools)
@@ -124,7 +133,7 @@ export function startRepl(state: AppState): void {
 
   let busy = false
   let menuOpen = false
-  let afterTool = false
+  let usedTokens = 0
   let closed = false
   let farewelled = false
   let abort: AbortController | null = null
@@ -132,10 +141,32 @@ export function startRepl(state: AppState): void {
   let pending: string[] = []
   let pendingTimer: NodeJS.Timeout | undefined
 
+  /** Empty composer shows a dim placeholder, with the cursor parked before it. */
+  const promptText = (): string =>
+    rl.line === '' ? composerPrompt(theme, PLACEHOLDER) : theme.accent('› ')
+
+  /** Redraw the composer; on an empty line park the cursor in front of the placeholder. */
+  const drawPrompt = (preserve: boolean): void => {
+    rl.setPrompt(promptText())
+    rl.prompt(preserve)
+    if (rl.line === '') process.stdout.write(`\u001B[${displayWidth(PLACEHOLDER)}D`)
+  }
+
   const showPrompt = (): void => {
     if (busy || closed || !process.stdin.isTTY) return
-    rl.setPrompt(theme.bold(theme.cyan('› ')))
-    rl.prompt()
+    showFooter()
+    drawPrompt(false)
+  }
+
+  /** Model, directory and key hints kept above the composer; readline cannot own a line below it. */
+  const showFooter = (): void => {
+    if (!process.stdin.isTTY) return
+    printFooter(theme, {
+      model: state.config.model,
+      cwd: state.session.cwd,
+      hint: '? 查看命令',
+      right: contextLeft(usedTokens, state.config.contextWindow),
+    })
   }
 
   const farewell = (): void => {
@@ -158,9 +189,11 @@ export function startRepl(state: AppState): void {
     // The interface is gone (Ctrl+D mid-turn): do not block on a question.
     if (closed) return false
     process.stdout.write(
-      `\n  ${theme.yellow('需要确认')} ${theme.bold(name)} ${theme.gray(clipLine(previewOf(name, raw), columns() - 20))}\n`,
+      `\n  ${theme.green(BULLET)} ${theme.bold('需要确认')} ${theme.cyan(name)} ${theme.gray(clipLine(previewOf(name, raw), columns() - 20))}\n`,
     )
-    const answer = (await ask(`  ${theme.yellow('允许执行?')} ${theme.gray('[y/N/a=全部允许]')} `)).toLowerCase()
+    const answer = (
+      await ask(`  ${theme.gray('›')} ${theme.bold('允许执行？')} ${theme.gray('[y/N/a=全部允许]')} `)
+    ).toLowerCase()
     if (answer === 'a' || answer === 'all') {
       state.config.autoApprove = true
       printNotice(theme, '本会话剩余工具调用将自动执行')
@@ -179,32 +212,31 @@ export function startRepl(state: AppState): void {
   const executor = new NativeToolExecutor({ approve: (tool, call) => approve(tool.name, call.arguments) })
 
   const hooks: TurnHooks = {
-    onThinking: () => spinner.start('思考中'),
+    onThinking: () => waiting.start('思考中'),
     onText: (chunk) => {
-      spinner.stop()
+      waiting.stop()
       process.stdout.write(chunk)
     },
     onReasoning: (chunk) => {
-      spinner.stop()
+      waiting.stop()
       process.stdout.write(theme.gray(chunk))
     },
     onToolCall: (call) => {
-      spinner.stop()
+      waiting.stop()
       printToolCall(theme, call.name, previewOf(call.name, call.arguments))
-      spinner.start('执行工具')
+      waiting.start('执行工具')
     },
     onToolResult: (_call, result) => {
-      spinner.stop()
+      waiting.stop()
       printToolResult(theme, {
         ok: !result.isError,
         summary: result.summary,
         content: result.content,
         diff: result.diff,
       })
-      afterTool = true
     },
     onNotice: (text) => {
-      spinner.stop()
+      waiting.stop()
       printNotice(theme, text)
     },
   }
@@ -213,7 +245,17 @@ export function startRepl(state: AppState): void {
     busy = true
     const controller = new AbortController()
     abort = controller
-    let wrote = false
+    const message = new MessageWriter(theme)
+    let partial = ''
+    const feed = (chunk: string): void => {
+      partial += chunk
+      let at = partial.indexOf('\n')
+      while (at >= 0) {
+        message.write(partial.slice(0, at))
+        partial = partial.slice(at + 1)
+        at = partial.indexOf('\n')
+      }
+    }
     try {
       if (state.config.apiKey === '') {
         printError(theme, '尚未配置 API Key：用 /key 设置，或 /model add 新建一个带密钥的模型')
@@ -237,32 +279,23 @@ export function startRepl(state: AppState): void {
         {
           ...hooks,
           onText: (chunk) => {
-            spinner.stop()
-            if (afterTool) {
-              afterTool = false
-              process.stdout.write('\n')
-            }
-            wrote = true
-            process.stdout.write(chunk)
+            waiting.stop()
+            feed(chunk)
           },
         },
       ))
-      if (wrote) process.stdout.write('\n')
+      if (partial !== '') feed('\n')
+      usedTokens = result.usage.inputTokens + result.usage.outputTokens
       if (result.aborted) {
         printInterrupt(theme, '已中断本轮')
-      } else if (result.usage.inputTokens + result.usage.outputTokens > 0) {
-        printUsage(theme, {
-          seconds: result.seconds,
-          prompt: result.usage.inputTokens,
-          completion: result.usage.outputTokens,
-          cached: result.usage.cacheReadTokens ?? 0,
-        })
+      } else if (usedTokens > 0) {
+        printUsage(theme, { seconds: result.seconds })
       }
     } catch (error) {
-      if (wrote) process.stdout.write('\n')
+      if (partial !== '') feed('\n')
       printError(theme, error instanceof Error ? error.message : String(error))
     } finally {
-      spinner.stop()
+      waiting.stop()
       busy = false
       abort = null
       process.stdout.write('\n')
@@ -383,7 +416,15 @@ export function startRepl(state: AppState): void {
   }
 
   const pickCommand = async (): Promise<string | undefined> =>
-    selectOption({ rl, theme, title: '命令', items: COMMAND_MENU, filterable: true })
+    selectOption({
+      rl,
+      theme,
+      title: '命令',
+      items: COMMAND_MENU,
+      filterable: true,
+      // 输入行由菜单接管：`› /` 钉在原位，筛选词就地增长，菜单只在下面展开。
+      prompt: (text) => `${theme.accent('› ')}${text}`,
+    })
 
   const resumeSession = (target: string): void => {
     const resumed = loadSession(state.config.sessionDir, target, state.session.cwd)
@@ -712,7 +753,8 @@ export function startRepl(state: AppState): void {
       clearLine()
       const picked = await pickCommand()
       if (picked === undefined) {
-        showPrompt()
+        // 菜单期间页脚没动过，只需把输入行画回原位，别再叠一遍页脚。
+        drawPrompt(false)
         return
       }
       await execute(picked)
@@ -749,11 +791,12 @@ export function startRepl(state: AppState): void {
     readline.emitKeypressEvents(process.stdin, rl)
     process.stdin.on('keypress', (input: string, key: readline.Key) => {
       if (busy && abort && key?.name === 'escape') {
-        spinner.stop()
+        waiting.stop()
         abort.abort()
-        process.stdout.write(`\n${theme.yellow('·')} 正在中断…\n`)
+        process.stdout.write(`\n${theme.yellow(BULLET)} 正在中断…\n`)
         return
       }
+      if (!busy && !menuOpen && !closed) drawPrompt(true)
       // 提示符为空时敲下 `/`：立刻接管成命令菜单，不用再按回车。
       // 中文输入法下常打出全角 `／`，一并当作触发字符。
       const slash = (input === '/' || input === '／') && (rl.line === '/' || rl.line === '／')
@@ -765,9 +808,9 @@ export function startRepl(state: AppState): void {
 
   rl.on('SIGINT', () => {
     if (busy && abort) {
-      spinner.stop()
+      waiting.stop()
       abort.abort()
-      process.stdout.write(`\n${theme.yellow('·')} 正在中断…\n`)
+      process.stdout.write(`\n${theme.yellow(BULLET)} 正在中断…\n`)
       return
     }
     // A non-empty line is cleared first; an empty one exits.
@@ -798,20 +841,17 @@ export function startRepl(state: AppState): void {
     })
   })
 
-  const activeEntry = state.store.find(state.config.alias)
   printHeader(theme, {
     version: VERSION,
     model: state.config.model,
-    alias: state.config.alias,
-    key:
-      state.config.apiKey === ''
-        ? '未配置（用 /key 设置）'
-        : activeEntry
-          ? state.store.keySource(activeEntry)
-          : '环境变量',
     cwd: state.session.cwd,
-    session: state.session.id,
-    tools: state.tools.length,
+    tips: [
+      ['/model', '切换或添加模型'],
+      ['/compact', '把较早的对话压缩成摘要'],
+      ['/resume', '恢复历史会话'],
+      ['/cd', '切换工作目录'],
+      ['/help', '查看全部命令'],
+    ],
   })
   showPrompt()
 }

@@ -1,16 +1,15 @@
 /**
- * One-line activity spinner, rendered only on a TTY so piped runs stay clean.
- * @module @astra/cli/spinner
+ * One-line waiting indicator, rendered only on a TTY so piped runs stay clean.
+ * @module @astra/cli/waiting
  */
 
+import { workingLine } from './render.ts'
 import type { Theme } from './render.ts'
 
-const FRAMES = ['✻', '✶', '✷', '✸', '✹', '✺', '✹', '✸', '✷', '✶']
-
-export class Spinner {
+/** Waiting indicator: a bullet, the current activity and a running timer. */
+export class Waiting {
   private readonly theme: Theme
   private timer: NodeJS.Timeout | undefined
-  private frame = 0
   private started = 0
   private label = ''
   private visible = false
@@ -19,7 +18,7 @@ export class Spinner {
     this.theme = theme
   }
 
-  /** Spinners need a terminal; pipes get silence instead of escape codes. */
+  /** The indicator needs a terminal; pipes get silence instead of escape codes. */
   get enabled(): boolean {
     return process.stdout.isTTY === true
   }
@@ -29,7 +28,7 @@ export class Spinner {
     this.label = label
     if (this.timer === undefined) {
       this.started = Date.now()
-      this.timer = setInterval(() => this.render(), 90)
+      this.timer = setInterval(() => this.render(), 1000)
       this.timer.unref()
     }
     this.render()
@@ -53,11 +52,8 @@ export class Spinner {
   }
 
   private render(): void {
-    const elapsed = ((Date.now() - this.started) / 1000).toFixed(1)
-    const frame = this.theme.cyan(FRAMES[this.frame++ % FRAMES.length])
-    process.stdout.write(
-      `\r\u001B[2K${frame} ${this.theme.gray(`${this.label}… ${elapsed}s · Esc / Ctrl+C 中断`)}`,
-    )
+    const elapsed = (Date.now() - this.started) / 1000
+    process.stdout.write(`\r\u001B[2K${workingLine(this.theme, this.label, elapsed)}`)
     this.visible = true
   }
 }

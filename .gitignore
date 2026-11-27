@@ -8,3 +8,7 @@ benchmark/datasets/
 
 # 个人待办笔记，不入库
 /TODO.md
+/rules.md
+
+# 会话导出记录（含密钥痕迹），不入库
+/session-record-*.md

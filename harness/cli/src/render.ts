@@ -13,6 +13,8 @@ export interface Theme {
   yellow: (text: string) => string
   cyan: (text: string) => string
   gray: (text: string) => string
+  /** Codex 用于提示符与 `/model` 等可操作文字的天蓝色 (CHATGPT_BLUE_200)。 */
+  accent: (text: string) => string
 }
 
 function code(open: string, text: string, enabled: boolean): string {
@@ -29,6 +31,7 @@ export function createTheme(enabled: boolean): Theme {
     yellow: (text) => code('33', text, enabled),
     cyan: (text) => code('36', text, enabled),
     gray: (text) => code('90', text, enabled),
+    accent: (text) => code('38;2;99;168;248', text, enabled),
   }
 }
 
@@ -51,7 +54,7 @@ export function clipLine(text: string, limit = columns() - 4): string {
 }
 
 /** Terminal width of a string, counting CJK characters as two columns. */
-function displayWidth(text: string): number {
+export function displayWidth(text: string): number {
   let width = 0
   for (const char of text) {
     const point = char.codePointAt(0) ?? 0
@@ -68,8 +71,25 @@ function displayWidth(text: string): number {
   return width
 }
 
+/** 含 ANSI 颜色时也能量出真实列宽（用于把光标停在着色文本末尾）。 */
+export function styledWidth(text: string): number {
+  return displayWidth(text.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, ''))
+}
+
 function padColumns(text: string, target: number): string {
   return text + ' '.repeat(Math.max(0, target - displayWidth(text)))
+}
+
+function clipWidth(text: string, limit: number): string {
+  let width = 0
+  let out = ''
+  for (const char of text) {
+    const size = displayWidth(char)
+    if (width + size > limit) return `${out}…`
+    width += size
+    out += char
+  }
+  return out
 }
 
 const ANSI = /\u001B\[[0-9;?]*[ -/]*[@-~]/y
@@ -100,57 +120,155 @@ export function fitLine(text: string, limit = columns()): string {
   return out
 }
 
-export function humanTokens(value: number): string {
-  if (value < 1000) return String(value)
-  return `${(value / 1000).toFixed(1)}k`
+/** Tool / status bullet, Codex style. */
+export const BULLET = '•'
+/** Result elbow. */
+export const ELBOW = '└'
+const TOOL_VERBS: Record<string, string> = {
+  run_terminal: 'Ran',
+  read_file: 'Read',
+  write_file: 'Wrote',
+  edit_file: 'Edited',
+  list_dir: 'Listed',
 }
 
-/** Spinner / completion glyph. */
-export const SPARK = '✻'
-/** Tool bullet. */
-export const BULLET = '⏺'
-/** Result elbow. */
-export const ELBOW = '⎿'
+/** 路径过长时保留开头与结尾，中间用省略号收窄（对齐 Codex 的 center_truncate_path）。 */
+function clipPath(text: string, limit: number): string {
+  if (displayWidth(text) <= limit) return text
+  if (limit <= 1) return '…'
+  const tail = text.slice(-Math.max(1, Math.floor(limit * 0.6)))
+  let head = ''
+  let width = 0
+  const budget = limit - 1 - displayWidth(tail)
+  for (const char of text) {
+    const size = displayWidth(char)
+    if (width + size > budget) break
+    width += size
+    head += char
+  }
+  return `${head}…${tail}`
+}
 
-/** Startup banner: identity, active model, workspace, session. */
-export function printHeader(
-  theme: Theme,
-  info: {
-    version: string
-    model: string
-    alias?: string
-    key?: string
-    cwd: string
-    session: string
-    tools: number
-  },
-): void {
-  const rule = theme.gray('─'.repeat(Math.min(columns() - 4, 64)))
+/** Codex 的卡片内容宽度上限（`SESSION_HEADER_MAX_INNER_WIDTH`）。 */
+const HEADER_MAX_INNER_WIDTH = 56
+
+export interface HeaderInfo {
+  version: string
+  model: string
+  /** 推理强度，有值时才跟在模型名后面。 */
+  effort?: string
+  cwd: string
+  /** `[命令, 说明]` 行，列在框下面，与 Codex 首次启动一致。 */
+  tips: ReadonlyArray<readonly [string, string]>
+}
+
+/**
+ * 启动头：圆角卡片（标题 / model / directory）+ 框下的命令列表。
+ * 几何照 Codex：内容宽 ≤ min(终端−4, 56)，边框在内容外各留一格。
+ */
+export function printHeader(theme: Theme, info: HeaderInfo): void {
+  const inner = Math.max(20, Math.min(columns() - 4, HEADER_MAX_INNER_WIDTH))
+  const labelWidth = 'directory:'.length
+
+  const rows: Array<{ plain: string; paint: string }> = []
+
+  rows.push({
+    plain: `>_ Astra CLI (v${info.version})`,
+    paint: `${theme.dim('>_ ')}${theme.bold('Astra CLI')}${theme.dim(` (v${info.version})`)}`,
+  })
+  rows.push({ plain: '', paint: '' })
+
+  const modelLabel = 'model:'.padEnd(labelWidth)
+  const effort = info.effort ? ` ${info.effort}` : ''
+  const hintCommand = '/model'
+  const hintTail = ' to change'
+  const fixedWidth =
+    displayWidth(modelLabel) + 1 + displayWidth(effort) + 3 + displayWidth(hintCommand + hintTail)
   const model =
-    info.alias && info.alias !== info.model ? `${info.alias} ${theme.gray('→')} ${info.model}` : info.model
-  const lines: string[] = []
-  lines.push('')
-  lines.push(`  ${theme.bold(theme.cyan(SPARK))} ${theme.bold('Astra CLI')} ${theme.gray(`v${info.version}`)}`)
-  lines.push(`    ${theme.gray('终端里的对话式编程助手')}`)
-  lines.push('')
-  lines.push(
-    `  ${theme.gray('model'.padEnd(8))}${theme.bold(model)}` +
-      (info.key ? `  ${theme.gray(`· 密钥 ${info.key}`)}` : ''),
+    displayWidth(info.model) + fixedWidth > inner
+      ? clipWidth(info.model, Math.max(4, inner - fixedWidth))
+      : info.model
+  rows.push({
+    plain: `${modelLabel} ${model}${effort}   ${hintCommand}${hintTail}`,
+    paint:
+      theme.dim(`${modelLabel} `) +
+      theme.bold(model) +
+      (effort ? theme.dim(effort) : '') +
+      theme.dim('   ') +
+      theme.accent(hintCommand) +
+      theme.dim(hintTail),
+  })
+
+  const dirLabel = 'directory:'.padEnd(labelWidth)
+  const dir = clipPath(info.cwd, inner - displayWidth(dirLabel) - 1)
+  rows.push({
+    plain: `${dirLabel} ${dir}`,
+    paint: theme.dim(`${dirLabel} `) + dir,
+  })
+
+  const contentWidth = Math.min(
+    inner,
+    rows.reduce((widest, row) => Math.max(widest, displayWidth(row.plain)), 0),
   )
-  lines.push(`  ${theme.gray('cwd'.padEnd(8))}${info.cwd}`)
-  lines.push(`  ${theme.gray('session'.padEnd(8))}${info.session}  ${theme.gray(`· ${info.tools} 个工具`)}`)
-  lines.push('')
-  lines.push(`  ${theme.gray('/ 呼出命令菜单 · 直接输入开始对话 · Esc 中断 · Ctrl+C 退出')}`)
-  lines.push('')
-  lines.push(`  ${rule}`)
-  lines.push('')
+  const rule = '─'.repeat(contentWidth + 2)
+
+  const lines = [
+    theme.dim(`╭${rule}╮`),
+    ...rows.map(
+      (row) =>
+        `${theme.dim('│ ')}${row.paint}${' '.repeat(
+          Math.max(0, contentWidth - displayWidth(row.plain)),
+        )}${theme.dim(' │')}`,
+    ),
+    theme.dim(`╰${rule}╯`),
+    '',
+    `  ${theme.dim('描述一个任务开始，或试试这些命令：')}`,
+    '',
+    ...info.tips.map(([command, description]) => `  ${theme.accent(command)} ${theme.dim(`- ${description}`)}`),
+    '',
+  ]
   process.stdout.write(lines.join('\n'))
 }
 
-/** Render the announcement of one tool call. */
-export function printToolCall(theme: Theme, name: string, detail: string): void {
+export interface FooterInfo {
+  model: string
+  effort?: string
+  cwd: string
+  hint: string
+  right: string
+}
+
+/** 页脚两行：状态（模型 · 目录）+ 快捷键行（右侧放上下文余量），照 Codex 的底栏。 */
+export function printFooter(theme: Theme, info: FooterInfo): void {
+  const status = `${info.model}${info.effort ? ` ${info.effort}` : ''} default · ${info.cwd}`
+  process.stdout.write(`  ${theme.dim(clipLine(status, columns() - 4))}\n`)
+  const gap = columns() - 2 - displayWidth(info.hint) - displayWidth(info.right)
   process.stdout.write(
-    `\n${theme.green(BULLET)} ${theme.bold(name)}${detail ? `(${theme.cyan(clipLine(detail, columns() - 8))})` : ''}\n`,
+    `  ${theme.dim(info.hint)}${' '.repeat(Math.max(1, gap))}${theme.dim(info.right)}\n`,
+  )
+}
+
+/** Prompt for an empty composer: accent `›` followed by a dim placeholder. */
+export function composerPrompt(theme: Theme, placeholder: string): string {
+  return `${theme.accent('› ')}${theme.dim(placeholder)}`
+}
+
+/** Share of the context window still unused, as a whole percent. */
+export function contextLeft(usedTokens: number, contextWindow: number): string {
+  const percent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / contextWindow) * 100)))
+  return `${percent}% 上下文剩余`
+}
+
+/** Composer shown while waiting: a static bullet and a running timer, no animation. */
+export function workingLine(theme: Theme, label: string, elapsed: number): string {
+  return `${theme.bold(BULLET)} ${label} ${theme.gray(`(${elapsed.toFixed(0)}s · esc 中断)`)}` 
+}
+
+/** Print the announcement of one tool call. */
+export function printToolCall(theme: Theme, name: string, detail: string): void {
+  const verb = TOOL_VERBS[name] ?? name
+  process.stdout.write(
+    `\n${theme.dim(BULLET)} ${verb}${detail ? ` ${clipLine(detail, columns() - 8)}` : ''}\n`,
   )
 }
 
@@ -257,26 +375,35 @@ export function printToolResult(
   }
 }
 
-/** Completion line after a turn. */
+/** One assistant message: a dim bullet on the first line, hanging indent after. */
+export class MessageWriter {
+  private readonly theme: Theme
+  private started = false
+
+  constructor(theme: Theme) {
+    this.theme = theme
+  }
+
+  write(line: string): void {
+    process.stdout.write(`${this.started ? '  ' : this.theme.dim(`${BULLET} `)}${sanitize(line)}\n`)
+    this.started = true
+  }
+}
+
+/** Turn-end line. */
 export function printUsage(
   theme: Theme,
-  info: { seconds: number; prompt: number; completion: number; cached: number },
+  info: { seconds: number },
 ): void {
-  const parts = [
-    `${info.seconds.toFixed(1)}s`,
-    `↑${humanTokens(info.prompt)}`,
-    `↓${humanTokens(info.completion)}`,
-  ]
-  if (info.cached > 0) parts.push(`缓存 ${humanTokens(info.cached)}`)
-  process.stdout.write(`\n${theme.green(SPARK)} ${theme.gray(`完成 · ${parts.join(' · ')}`)}\n`)
+  process.stdout.write(`${theme.gray(`\n  用时 ${info.seconds.toFixed(1)}s`)}\n`)
 }
 
 export function printInterrupt(theme: Theme, message = '已中断'): void {
-  process.stdout.write(`\n${theme.yellow(BULLET)} ${theme.yellow(message)}\n`)
+  process.stdout.write(`\n${theme.dim(BULLET)} ${theme.yellow(message)}\n`)
 }
 
 export function printError(theme: Theme, message: string): void {
-  process.stdout.write(`\n${theme.red(BULLET)} ${theme.red(message)}\n`)
+  process.stdout.write(`\n${theme.red('■')} ${theme.red(message)}\n`)
 }
 
 export function printNotice(theme: Theme, message: string): void {

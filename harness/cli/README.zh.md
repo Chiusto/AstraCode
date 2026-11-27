@@ -3,14 +3,13 @@
 终端里的对话式入口：一个能读写文件、跑命令、连续多轮调用工具的 agent 循环，直接跑在这个仓库上。
 
 ```text
-❯ 看一下 harness/cli/src 里有哪些文件，说明各自职责
+› 看一下 harness/cli/src 里有哪些文件，说明各自职责
 
-⏺ list_dir harness/cli/src
-  ⎿ 8 项
-    config.ts  models.ts  prompt.ts  …
+• Listed harness/cli/src
+  └ 8 项
+• src 目录下共 8 个文件：config 负责配置与 .env，models 管理 models.json，prompt 组装系统提示词……
 
-  src 目录下共 8 个文件：config 负责配置与 .env，models 管理 models.json，prompt 组装系统提示词……
-· 2.1s · ↑2.4k · ↓210 · 缓存 1.9k
+  用时 2.1s
 ```
 
 ## 与上游的关系
@@ -26,7 +25,7 @@
 | `src/models.ts` | `models.json`：别名、地址、密钥引用 |
 | `src/prompt.ts` | 系统提示词的段落组装（`assembleSystemPrompt` / `renderPrompt`） |
 | `src/repl.ts` | readline 交互、斜杠命令、工具/回复渲染 |
-| `src/render.ts` `select.ts` `spinner.ts` `secret.ts` | 纯终端表现层 |
+| `src/render.ts` `select.ts` `waiting.ts` `secret.ts` | 纯终端表现层 |
 
 核心逻辑都在 `packages/`：会话日志、轮次循环、重试、压缩、时间上下文。PTC 执行器（`tool-executor-ptc` / `run_code`）未移植，只提供原生工具调用。
 
@@ -66,39 +65,57 @@ API Key 从 `AstraCode/.env` 的 `DEEPSEEK_API_KEY` 读取（也接受同名环�
 
 ## 界面
 
-启动后是一个 Claude Code / Codex 风格的终端外壳：
+启动后是照 Codex CLI 0.156 复刻的终端界面：
 
 ```text
-  ✻ Astra CLI v0.1.0
-    终端里的对话式编程助手
+╭───────────────────────────────────────────────╮
+│ >_ Astra CLI (v0.1.0)                         │
+│                                               │
+│ model:     deepseek-chat   /model to change   │
+│ directory: D:\CodeSpace\AstraCode             │
+╰───────────────────────────────────────────────╯
 
-  model   deepseek-chat  · 密钥 env DEEPSEEK_API_KEY
-  cwd     D://CodeSpace//AstraCode
-  session 20261126-200726-ut1l  · 5 个工具
+  描述一个任务开始，或试试这些命令：
 
-  /help 查看命令 · 直接输入开始对话 · Esc 中断 · Ctrl+C 退出
+  /model - 切换或添加模型
+  /compact - 把较早的对话压缩成摘要
+  /resume - 恢复历史会话
+  /cd - 切换工作目录
+  /help - 查看全部命令
 
-  ────────────────────────────────────────────────────────────────
+› 问问 Astra，或描述一个任务
 
-› 把 hello.txt 里的 b 改成 c
-
-⏺ edit_file(D:/tmp/hello.txt)
-  ⎿ 修改 D:/tmp/hello.txt · 1 处
-  +1 -1
-    - b
-    + c
-
-✻ 完成 · 3.8s · ↑4.9k · ↓283 · 缓存 4.1k
-
-›
+  deepseek-chat default · D:\CodeSpace\AstraCode
+  ? 查看命令                                                     100% 上下文剩余
 ```
 
-- 等待模型时显示单行 spinner（`✻ 思考中… 1.2s · Esc / Ctrl+C 中断`），首个字到达即清除。
-- 工具调用用 `⏺ 名称(参数)` + `⎿ 结果` 两行结构；`write_file` / `edit_file` 直接渲染红绿 diff（最多 14 行，超出折叠）。
-- 普通输出只展示前 4 行，超出折叠为 `… 还有 N 行`，完整内容仍会发给模型。
+一轮对话：
+
+```text
+› 用 run_terminal 执行 echo hi，然后汇报
+
+• Ran echo hi
+  └ exit 0 · hi
+    hi
+• 已执行 `echo hi`，输出 `hi`，退出码 0。
+
+  用时 1.5s
+
+  deepseek-chat default · D:\CodeSpace\AstraCode
+  ? 查看命令                                                     100% 上下文剩余
+```
+
+- 启动头是圆角卡片：内容宽 `min(终端−4, 56)`，边框在内容外各留一格；里面依次是 `>_ 标题 (v版本)`、空行、`model:` 与 `directory:` 两行，标签按 `directory:` 的宽度对齐，`/model` 用天蓝色标出。路径过长时中间省略，保持结尾可见。
+- 空输入框显示灰色占位符，首个字符落下即消失；光标始终停在占位符之前，`›` 用天蓝色。
+- 输入框上方两行是页脚：`模型 default · 目录` 与 `? 快捷键`，右侧按上一次请求的 token 估算剩余上下文（`ASTRA_CONTEXT_WINDOW`）。readline 无法在输入行下方维护常驻页脚，所以这两行放在上方，每次回到提示符时重画。
+- 等待模型时显示 `• 思考中 (1s · esc 中断)`，每秒更新计时，首个字到达即清除。
+- 模型回复每条以灰色 `•` 开头，续行缩进 2 格；不渲染 Markdown，原样输出。回合结束是一行 `用时 Ns`（token 用量看 `/usage`）。
+- 工具调用用 `• 动词 参数` + `└ 结果` 两行结构（动词：Ran / Read / Wrote / Edited / Listed）；`write_file` / `edit_file` 直接渲染红绿 diff（最多 14 行，超出折叠）。
+- 普通输出只展示前 4 行，超出折叠为 `… 还有 N 行`，完整内容仍会发给模型。出错用红色 `■`。
 - `Esc` 中断本轮，`Ctrl+C` 在空行退出、有输入时先清空当前行。
 - 敲 `/` 直接进命令菜单（输入即筛选），`Tab` 仍可补全斜杠命令；上下键翻阅历史，历史跨会话保存在 `sessions/.history`。
-- 菜单是就地重绘的：`Esc` 取消后回到普通输入，不会留下残影；无匹配项时 `Enter` 不确认，退格继续修改。
+- 菜单标题以 `›` 开头、选中项用 `❯` 标出；`Esc` 取消后回到普通输入，不会留下残影；无匹配项时 `Enter` 不确认，退格继续修改。
+- 敲 `/` 后输入行本身不动：`› /` 钉在原位并随筛选词就地增长（`› /mo`），菜单只在这行**下方**展开，光标始终回到输入行末尾；`Esc` 收起菜单后只重画输入行，不会把页脚再叠一遍。
 
 ## 模型与密钥
 
@@ -185,5 +202,5 @@ cli/
     ├── repl.ts       # readline 交互与斜杠命令
     ├── select.ts     # 菜单选择器
     ├── secret.ts     # 密钥输入（不回显）
-    └── spinner.ts    # 单行活动指示器
+    └── waiting.ts    # 等待指示器（圆点 + 计时）
 ```
