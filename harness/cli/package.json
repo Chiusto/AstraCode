@@ -1,0 +1,17 @@
+{
+  "name": "@astra/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Terminal chat entry point for the Astra harness",
+  "bin": {
+    "astra": "./index.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "chat": "node index.ts",
+    "check": "node --check index.ts"
+  }
+}
